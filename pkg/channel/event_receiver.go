@@ -131,6 +131,7 @@ func (r *EventReceiver) Start(ctx context.Context) error {
 }
 
 func (r *EventReceiver) ServeHTTP(ctx context.Context, event cloudevents.Event, resp *cloudevents.EventResponse) error {
+	// 只支持POST请求
 	tctx := cloudevents.HTTPTransportContextFrom(ctx)
 	if tctx.Method != http.MethodPost {
 		resp.Status = http.StatusMethodNotAllowed
@@ -150,6 +151,8 @@ func (r *EventReceiver) ServeHTTP(ctx context.Context, event cloudevents.Event, 
 
 	host := tctx.Host
 	r.logger.Debug("Received request", zap.String("host", host))
+	// 【关键点🏆】： 通过input host映射到对应的channel
+	// 具体实现之一是 ParseChannel，通过把hostname用“.”切分，组成成Channel的Name和Namespace
 	channel, err := r.hostToChannelFunc(host)
 	if err != nil {
 		r.logger.Info("Could not extract channel", zap.Error(err))
@@ -158,10 +161,12 @@ func (r *EventReceiver) ServeHTTP(ctx context.Context, event cloudevents.Event, 
 	}
 	r.logger.Debug("Request mapped to channel", zap.String("channel", channel.String()))
 
+	// 记录历史，增加Trace信息
 	sctx := utils.ContextFrom(tctx, nil)
 	AppendHistory(&event, host)
 
 	event = tracing.AddTraceparentAttributeFromContext(ctx, event)
+	// 【关键点🏆】：调用receiverFunc处理channel收到的event
 	err = r.receiverFunc(sctx, channel, event)
 	if err != nil {
 		if _, ok := err.(*UnknownChannelError); ok {

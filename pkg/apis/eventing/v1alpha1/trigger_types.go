@@ -39,6 +39,8 @@ const (
 
 // Trigger represents a request to have events delivered to a consumer from a
 // Broker's event pool.
+// Trigger结构的定义如下，除了metadata外，主要关注TriggerSpec，
+// 其中包含filter规则，以及消息订阅者的URI
 type Trigger struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

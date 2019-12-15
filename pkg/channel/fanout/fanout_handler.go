@@ -40,9 +40,11 @@ const (
 
 // Config for a fanout.Handler.
 type Config struct {
+	// 一个订阅者列表
 	Subscriptions []eventingduck.SubscriberSpec `json:"subscriptions"`
 	// AsyncHandler controls whether the Subscriptions are called synchronous or asynchronously.
 	// It is expected to be false when used as a sidecar.
+	// 是否使用同步投递方式
 	AsyncHandler bool `json:"asyncHandler,omitempty"`
 }
 
@@ -86,6 +88,7 @@ func NewHandler(logger *zap.Logger, config Config) (*Handler, error) {
 	return handler, nil
 }
 
+// 区分了同步和异步两种模式，同步模式直接调用dispatch, 异步模式使用goroutine dispatch event
 func createReceiverFunction(f *Handler) func(context.Context, channel.ChannelReference, cloudevents.Event) error {
 	return func(ctx context.Context, _ channel.ChannelReference, event cloudevents.Event) error {
 		if f.config.AsyncHandler {
@@ -99,7 +102,9 @@ func createReceiverFunction(f *Handler) func(context.Context, channel.ChannelRef
 	}
 }
 
+// FanoutHandler对外暴露HTTP服务
 func (f *Handler) ServeHTTP(ctx context.Context, event cloudevents.Event, resp *cloudevents.EventResponse) error {
+	// EventReceiver部分的ServeHTTP方法，最终调用的是ReceiverFunc, 而ReceiverFunc内部调用了FanoutHandler的dispatch方法
 	return f.receiver.ServeHTTP(ctx, event, resp)
 }
 
@@ -107,6 +112,7 @@ func (f *Handler) ServeHTTP(ctx context.Context, event cloudevents.Event, resp *
 // events return successfully, then return nil. Else, return an error.
 func (f *Handler) dispatch(ctx context.Context, event cloudevents.Event) error {
 	errorCh := make(chan error, len(f.config.Subscriptions))
+	// 【关键点🏆】：遍历配置的订阅者列表，并逐一调用FanoutHandler的makeFanoutRequest方法
 	for _, sub := range f.config.Subscriptions {
 		go func(s eventingduck.SubscriberSpec) {
 			errorCh <- f.makeFanoutRequest(ctx, event, s)

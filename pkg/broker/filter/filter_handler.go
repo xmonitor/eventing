@@ -157,12 +157,14 @@ func (r *Handler) Start(ctx context.Context) error {
 
 func (r *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *cloudevents.EventResponse) error {
 	tctx := cloudevents.HTTPTransportContextFrom(ctx)
+	// 仅支持POST方式
 	if tctx.Method != http.MethodPost {
 		resp.Status = http.StatusMethodNotAllowed
 		return nil
 	}
 
 	// tctx.URI is actually the path...
+	// 从请求的URI中解析出trigger的路径
 	triggerRef, err := path.Parse(tctx.URI)
 	if err != nil {
 		r.logger.Info("Unable to parse path as a trigger", zap.Error(err), zap.String("path", tctx.URI))
@@ -170,6 +172,7 @@ func (r *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *
 	}
 
 	// Remove the TTL attribute that is used by the Broker.
+	// 过滤掉TTL为空的消息，同时把TTL从消息属性中移除，因为只有Broker内部在用
 	ttl, err := broker.GetTTL(event.Context)
 	if err != nil {
 		// Only messages sent by the Broker should be here. If the attribute isn't here, then the
@@ -186,6 +189,7 @@ func (r *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *
 
 	r.logger.Debug("Received message", zap.Any("triggerRef", triggerRef))
 
+	// 【关键🏆】发送消息, 注意这里传入triggerRef后面会用作filter
 	responseEvent, err := r.sendEvent(ctx, tctx, triggerRef, &event)
 	if err != nil {
 		r.logger.Error("Error sending the event", zap.Error(err))
@@ -211,7 +215,9 @@ func (r *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *
 }
 
 // sendEvent sends an event to a subscriber if the trigger filter passes.
+// 消息过滤
 func (r *Handler) sendEvent(ctx context.Context, tctx cloudevents.HTTPTransportContext, trigger path.NamespacedNameUID, event *cloudevents.Event) (*cloudevents.Event, error) {
+	// 根据前面从POST URI中解析出的trigger路径获取Trigger
 	t, err := r.getTrigger(ctx, trigger)
 	if err != nil {
 		r.logger.Info("Unable to get the Trigger", zap.Error(err), zap.Any("triggerRef", trigger))
@@ -225,6 +231,7 @@ func (r *Handler) sendEvent(ctx context.Context, tctx cloudevents.HTTPTransportC
 		filterType: triggerFilterAttribute(t.Spec.Filter, "type"),
 	}
 
+	// 从Trigger中获取订阅者URL
 	subscriberURI := t.Status.SubscriberURI
 	if subscriberURI == nil {
 		err = errors.New("unable to read subscriberURI")
@@ -234,6 +241,7 @@ func (r *Handler) sendEvent(ctx context.Context, tctx cloudevents.HTTPTransportC
 	}
 
 	// Check if the event should be sent.
+	// 【关键🏆】根据Trigger检查event是否需要被过滤掉
 	filterResult := r.shouldSendEvent(ctx, &t.Spec, event)
 
 	if filterResult == failFilter {
@@ -253,12 +261,14 @@ func (r *Handler) sendEvent(ctx context.Context, tctx cloudevents.HTTPTransportC
 		}
 	}
 
+	// 根据订阅者URI构建消息发送的上下文
 	sendingCTX := utils.ContextFrom(tctx, subscriberURI.URL())
 	// Due to an issue in utils.ContextFrom, we don't retain the original trace context from ctx, so
 	// bring it in manually.
 	sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
 
 	start := time.Now()
+	// 真正地把event发送发出
 	rctx, replyEvent, err := r.ceClient.Send(sendingCTX, *event)
 	rtctx := cloudevents.HTTPTransportContextFrom(rctx)
 	// Record the dispatch time.
@@ -282,6 +292,7 @@ func (r *Handler) getTrigger(ctx context.Context, ref path.NamespacedNameUID) (*
 // shouldSendEvent determines whether event 'event' should be sent based on the triggerSpec 'ts'.
 // Currently it supports exact matching on event context attributes and extension attributes.
 // If no filter is present, shouldSendEvent returns passFilter.
+// 根据TriggerSpec获取过滤器需要的属性，并以此作为入参调用filterEventByAttributes来真正地过滤消息
 func (r *Handler) shouldSendEvent(ctx context.Context, ts *eventingv1alpha1.TriggerSpec, event *cloudevents.Event) FilterResult {
 	// No filter specified, default to passing everything.
 	if ts.Filter == nil || (ts.Filter.DeprecatedSourceAndType == nil && ts.Filter.Attributes == nil) {
@@ -298,13 +309,17 @@ func (r *Handler) shouldSendEvent(ctx context.Context, ts *eventingv1alpha1.Trig
 		attrs = map[string]string(*ts.Filter.Attributes)
 	}
 
+	// 【关键🏆】根据Trigger Spec中的属性来过滤event
 	return r.filterEventByAttributes(ctx, attrs, event)
 }
 
+// 用于过滤的CloudEvent对象由两部分组成，一部分是标准的上下文属性，是knative eventing代码中写死的Map，
+// 另一部分使用event.Extension()中获取的Map。
 func (r *Handler) filterEventByAttributes(ctx context.Context, attrs map[string]string, event *cloudevents.Event) FilterResult {
 	// Set standard context attributes. The attributes available may not be
 	// exactly the same as the attributes defined in the current version of the
 	// CloudEvents spec.
+	// 标准属性
 	ce := map[string]interface{}{
 		"specversion":     event.SpecVersion(),
 		"type":            event.Type(),
@@ -318,6 +333,7 @@ func (r *Handler) filterEventByAttributes(ctx context.Context, attrs map[string]
 		// TODO: use data_base64 when SDK supports it.
 		"datacontentencoding": event.DeprecatedDataContentEncoding(),
 	}
+	// 拓展属性
 	ext := event.Extensions()
 	if ext != nil {
 		for k, v := range ext {
@@ -327,6 +343,8 @@ func (r *Handler) filterEventByAttributes(ctx context.Context, attrs map[string]
 
 	for k, v := range attrs {
 		var value interface{}
+		// 对于TriggerSpec中定义的每一个属性，检查其是否在Cloud Event中出现，
+		// 如果出现则返回passFilter, 否则返回failFilter
 		value, ok := ce[k]
 		// If the attribute does not exist in the event, return false.
 		if !ok {

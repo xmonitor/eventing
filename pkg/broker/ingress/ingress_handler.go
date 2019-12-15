@@ -29,6 +29,7 @@ type Handler struct {
 	Reporter   StatsReporter
 }
 
+// 启动一个Service对外提供服务，直到收到errCh或者stopCh便退出
 func (h *Handler) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -57,6 +58,7 @@ func (h *Handler) Start(ctx context.Context) error {
 	}
 }
 
+// 修改消息TTL, 转发消息
 func (h *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *cloudevents.EventResponse) error {
 	// Setting the extension as a string as the CloudEvents sdk does not support non-string extensions.
 	event.SetExtension(broker.EventArrivalTime, time.Now().Format(time.RFC3339))
@@ -91,6 +93,7 @@ func (h *Handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *
 	// bring it in manually.
 	sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
 
+	// 转发消息
 	rctx, _, err := h.CeClient.Send(sendingCTX, event)
 	rtctx := cloudevents.HTTPTransportContextFrom(rctx)
 	// Record the dispatch time.

@@ -47,6 +47,8 @@ const (
 	defaultMaxIdleConnectionsPerHost = 100
 )
 
+// EventDispatcher提供了两个方法：DispatchEvent和DispatchEventWithDelivery,
+// 后者比前者多了一个DeliveryOptions，包含死信消息Sink地址，用于接收无法被dispatch的消息
 type Dispatcher interface {
 	// DispatchEvent dispatches an event to a destination over HTTP.
 	//
@@ -121,10 +123,12 @@ func (d *EventDispatcher) DispatchEventWithDelivery(ctx context.Context, event c
 	if destination != "" {
 		destinationURL := d.resolveURL(destination)
 
+		// 【关键点🏆】：投递event到destinationURL
 		nonerrctx, response, err = d.executeRequest(ctx, destinationURL, event)
 		if err != nil {
-
+			// 投递异常的处理
 			if delivery != nil && delivery.DeadLetterSink != "" {
+				// 如果配置了死信sink地址deadLetterURL，那就尝试投递到deadLetterURL
 				deadLetterURL := d.resolveURL(delivery.DeadLetterSink)
 
 				// TODO: decorate event with deadletter attributes
@@ -145,10 +149,13 @@ func (d *EventDispatcher) DispatchEventWithDelivery(ctx context.Context, event c
 		return nil
 	}
 
+	// 如果配置有relay URL，那么把dispatch的response返回给relay URL
 	if reply != "" && response != nil {
 		replyURL := d.resolveURL(reply)
+		//【关键点🏆】：返回dispatch response信息给relayURL
 		_, _, err = d.executeRequest(nonerrctx, replyURL, *response)
 		if err != nil {
+			// 如果执行失败则尝试投递给死信sink URL
 			if delivery != nil && delivery.DeadLetterSink != "" {
 				deadLetterURL := d.resolveURL(delivery.DeadLetterSink)
 
@@ -165,11 +172,13 @@ func (d *EventDispatcher) DispatchEventWithDelivery(ctx context.Context, event c
 	return nil
 }
 
+// 使用CloudEvents.Client的Send方法发送event到目标URL，达到了'Dispatch'的效果。
 func (d *EventDispatcher) executeRequest(ctx context.Context, url *url.URL, event cloudevents.Event) (context.Context, *cloudevents.Event, error) {
 	d.logger.Debug("Dispatching event", zap.String("event.id", event.ID()), zap.String("url", url.String()))
 	originalTransportCTX := cloudevents.HTTPTransportContextFrom(ctx)
 	sendingCTX := d.generateSendingContext(originalTransportCTX, url, event)
 
+	// 【关键点🏆】： 使用CloudEvents.Client的Send方法发送event到目标URL
 	replyCTX, reply, err := d.ceClient.Send(sendingCTX, event)
 	if err != nil {
 		return nil, nil, err
